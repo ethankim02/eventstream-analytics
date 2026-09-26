@@ -8,12 +8,13 @@ import sys
 import typer
 
 from eventstream import config as cfg
-from eventstream.analytics import concentration, lifecycle, retention, segmentation
+from eventstream.analytics import concentration, lifecycle, overview, retention, segmentation
 from eventstream.analytics.anomalies import anomalies_from_warehouse
 from eventstream.experimentation import inference, power
 from eventstream.experimentation.simulator import SCENARIOS, generate_scenario
 from eventstream.ingestion.fixtures import write_fixture
 from eventstream.validation.checks import all_passed, run_checks
+from eventstream.validation.reconcile import reconcile_against_raw
 from eventstream.warehouse.build import build_warehouse
 from eventstream.warehouse.connection import connect
 
@@ -27,6 +28,10 @@ def ingest(
     ),
     start_block: int = typer.Option(0, help="Live mode only: first block (inclusive)."),
     end_block: int = typer.Option(0, help="Live mode only: last block (inclusive)."),
+    workers: int = typer.Option(4, help="Live mode only: parallel segment workers."),
+    segment_blocks: int = typer.Option(
+        2000, help="Live mode only: blocks per checkpointed segment file."
+    ),
 ) -> None:
     """Produce raw event Parquet in data/raw or data/fixtures."""
     settings = cfg.get_settings()
@@ -35,13 +40,25 @@ def ingest(
         df = write_fixture(settings, out_path)
         typer.echo(f"Wrote {len(df)} SYNTHETIC rows to {out_path}")
     elif mode == "live":
-        from eventstream.ingestion.live import ingest_block_range
+        from eventstream.ingestion.live import IngestionIncompleteError, ingest_block_range
 
         if end_block <= start_block:
             typer.echo("--end-block must be greater than --start-block for live mode", err=True)
             raise typer.Exit(code=1)
-        result = ingest_block_range(settings, start_block, end_block, cfg.RAW_DIR)
-        typer.echo(f"Wrote {result.row_count} real rows to {result.parquet_path}")
+        try:
+            result = ingest_block_range(
+                settings,
+                start_block,
+                end_block,
+                cfg.RAW_DIR,
+                workers=workers,
+                segment_blocks=segment_blocks,
+                progress=typer.echo,
+            )
+        except IngestionIncompleteError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(code=1) from exc
+        typer.echo(f"Wrote {result.row_count} real rows; manifest: {result.manifest_path}")
     else:
         typer.echo(f"unknown mode: {mode}", err=True)
         raise typer.Exit(code=1)
@@ -62,11 +79,19 @@ def transform(
 
 
 @app.command()
-def validate() -> None:
+def validate(
+    reconcile_glob: str = typer.Option(
+        "",
+        help="Also recompute every mart from these raw Parquet files, independently of the "
+        "SQL models, and compare (slow on large datasets).",
+    ),
+) -> None:
     """Run data-quality checks against the built warehouse."""
     settings = cfg.get_settings()
     con = connect(settings.warehouse_path)
     results = run_checks(con, settings.usdc_contract)
+    if reconcile_glob:
+        results += reconcile_against_raw(con, reconcile_glob)
     for r in results:
         status = "PASS" if r.passed else "FAIL"
         typer.echo(f"[{status}] {r.name}: {r.detail}")
@@ -80,7 +105,11 @@ def analyze() -> None:
     settings = cfg.get_settings()
     con = connect(settings.warehouse_path)
 
-    typer.echo("== Retention (mature cohorts only) ==")
+    typer.echo("== Dataset ==")
+    for key, value in overview.dataset_overview(con).items():
+        typer.echo(f"  {key}: {value}")
+
+    typer.echo("\n== Retention (mature cohorts only) ==")
     typer.echo(retention.summary_retention(con).to_string(index=False))
 
     typer.echo("\n== Activation proxy vs. W4 observed return ==")
@@ -163,7 +192,7 @@ def demo() -> None:
 
     typer.echo("\n3/5 Validating data quality...")
     try:
-        validate()
+        validate(reconcile_glob="")
     except typer.Exit as exc:
         if exc.exit_code != 0:
             raise
@@ -175,5 +204,16 @@ def demo() -> None:
     experiment(scenario="positive_effect")
 
 
+def main() -> None:
+    """Console-script entry point.
+
+    Click expands shell-style wildcards in arguments on Windows (mimicking a shell that
+    does not glob). `--source-glob "data/raw/*.parquet"` would then reach `transform` as
+    one path per file, which fails with "unexpected extra arguments". The glob must arrive
+    intact so DuckDB can expand it itself.
+    """
+    app(windows_expand_args=False)
+
+
 if __name__ == "__main__":
-    app()
+    main()

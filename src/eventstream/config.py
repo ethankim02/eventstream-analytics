@@ -53,7 +53,13 @@ class Settings:
     block_chunk_size: int = field(
         default_factory=lambda: int(os.environ.get("EVENTSTREAM_BLOCK_CHUNK_SIZE", "2000"))
     )
-    warehouse_path: Path = PROCESSED_DIR / "eventstream.duckdb"
+    # Override with EVENTSTREAM_WAREHOUSE_PATH to keep a real-data warehouse apart from the
+    # fixture-based one that `eventstream demo` rebuilds (and would otherwise overwrite).
+    warehouse_path: Path = field(
+        default_factory=lambda: Path(
+            os.environ.get("EVENTSTREAM_WAREHOUSE_PATH", PROCESSED_DIR / "eventstream.duckdb")
+        )
+    )
     request_timeout_seconds: int = 20
     max_retries: int = 5
 

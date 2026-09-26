@@ -18,7 +18,13 @@ import streamlit as st
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from eventstream import config as cfg  # noqa: E402
-from eventstream.analytics import concentration, lifecycle, retention, segmentation  # noqa: E402
+from eventstream.analytics import (  # noqa: E402
+    concentration,
+    lifecycle,
+    overview,
+    retention,
+    segmentation,
+)
 from eventstream.analytics.anomalies import anomalies_from_warehouse  # noqa: E402
 from eventstream.experimentation import inference, power  # noqa: E402
 from eventstream.experimentation.simulator import SCENARIOS, generate_scenario  # noqa: E402
@@ -37,6 +43,47 @@ def _warehouse_missing() -> bool:
     return not cfg.get_settings().warehouse_path.exists()
 
 
+def _compact(x: float) -> str:
+    """1234567 -> '1.2M'. Real-data totals run to trillions, which overflow a metric tile."""
+    for unit, size in (("T", 1e12), ("B", 1e9), ("M", 1e6), ("K", 1e3)):
+        if abs(x) >= size:
+            return f"{x / size:.1f}{unit}"
+    return f"{x:,.0f}"
+
+
+# The warehouse can hold hundreds of millions of events, and Streamlit re-runs this whole
+# script on every widget interaction. Heavy queries are therefore cached (keyed on the
+# warehouse file's mtime so a rebuild invalidates them) and aggregated in SQL, never by
+# pulling event-level rows into pandas.
+@st.cache_data(show_spinner="Aggregating...")
+def cached_overview(_con, _version: float) -> dict:
+    return overview.dataset_overview(_con)
+
+
+@st.cache_data(show_spinner="Aggregating...")
+def cached_lorenz(_con, _version: float):
+    return concentration.lorenz_curve(_con)
+
+
+@st.cache_data(show_spinner="Aggregating...")
+def cached_value_histogram(_con, _version: float):
+    """Transfer-value histogram in quarter-decade log bins, computed inside DuckDB."""
+    return _con.execute(
+        """
+        SELECT
+            POWER(10, FLOOR(LOG10(amount) * 4) / 4) AS bin_start,
+            COUNT(*) AS transfers
+        FROM stg_transfers
+        WHERE NOT is_self_transfer AND amount > 0
+        GROUP BY 1
+        ORDER BY 1
+        """
+    ).fetchdf()
+
+
+VERSION = cfg.get_settings().warehouse_path.stat().st_mtime if not _warehouse_missing() else 0.0
+
+
 st.title("EventStream Analytics")
 st.caption("Product analytics and experimentation for high-volume event streams.")
 
@@ -51,11 +98,9 @@ tabs = st.tabs(["Overview", "Retention", "Behavior", "Concentration", "Experimen
 # --- Overview -----------------------------------------------------------
 with tabs[0]:
     daily = con.execute("SELECT * FROM mart_daily_metrics ORDER BY activity_date").fetchdf()
-    src_counts = con.execute(
-        "SELECT source, COUNT(*) AS n FROM stg_transfers GROUP BY source"
-    ).fetchdf()
+    info = cached_overview(con, VERSION)
 
-    is_synthetic = "synthetic_fixture" in set(src_counts["source"])
+    is_synthetic = "synthetic_fixture" in str(info["sources"])
     if is_synthetic:
         st.warning(
             "This warehouse was built from the SYNTHETIC fixture generator, not live Base data. "
@@ -63,19 +108,31 @@ with tabs[0]:
             "real ingestion locally.",
             icon="⚠️",
         )
+    else:
+        st.info(
+            f"**Real data** — {info['networks']} native USDC Transfer events, source "
+            f"`{info['sources']}`. Blocks {info['min_block']:,}–{info['max_block']:,}, "
+            f"{info['first_event_at']:%Y-%m-%d %H:%M} → {info['last_event_at']:%Y-%m-%d %H:%M} UTC. "
+            f"{info['raw_events']:,} raw events; {info['self_transfer_events']:,} self-transfers "
+            f"are retained but excluded from every metric below "
+            f"({info['qualifying_events']:,} qualifying).",
+            icon="⛓️",
+        )
 
     total_events = int(daily["transfer_count"].sum())
-    active_wallets = con.execute(
-        "SELECT COUNT(DISTINCT wallet_address) FROM int_wallet_daily_activity"
-    ).fetchone()[0]
+    active_wallets = info["distinct_wallets_qualifying"]
     total_volume = float(daily["total_volume"].sum())
     median_amount = segmentation.value_distribution(con)["median_amount"].iloc[0]
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Transfer events", f"{total_events:,}")
-    c2.metric("Active wallets (window)", f"{active_wallets:,}")
-    c3.metric("USDC volume", f"{total_volume:,.0f}")
-    c4.metric("Median transfer", f"{median_amount:,.2f}")
+    c1.metric("Qualifying transfers", _compact(total_events))
+    c2.metric("Distinct wallets (window)", _compact(active_wallets))
+    c3.metric("Gross USDC volume", _compact(total_volume))
+    c4.metric("Median transfer (USDC)", f"{median_amount:,.2f}")
+    st.caption(
+        "Volume sums every Transfer event's amount, so multi-hop swaps and same-transaction "
+        "round trips are counted at every hop — it is gross event volume, not net value moved."
+    )
 
     st.subheader("Daily activity")
     fig = go.Figure()
@@ -105,11 +162,18 @@ with tabs[1]:
     st.subheader("First-seen cohort retention (mature cells only)")
     st.caption(
         "'First-seen' = first observed event within this dataset's window, not necessarily the "
-        "wallet's true first-ever on-chain activity. Blank cells are right-censored (not enough "
-        "time has elapsed yet) — see docs/METRICS.md."
+        "wallet's true first-ever on-chain activity. The window's opening-week cohort is "
+        "therefore a baseline dominated by wallets that were already active before the window "
+        "began, not a cohort of new wallets. Blank cells are right-censored (not enough time "
+        "has elapsed yet) — see docs/METRICS.md."
     )
     matrix = retention.retention_matrix(con)
-    st.dataframe(matrix.style.format("{:.1%}", na_rep="—"), use_container_width=True)
+    sizes = retention.cohort_sizes(con).set_index("cohort_week")["cohort_size"]
+    matrix.insert(0, "cohort_size", sizes.reindex(matrix.index))
+    matrix = matrix.rename(index=lambda ts: ts.strftime("%Y-%m-%d"))
+    formats = {c: "{:.1%}" for c in matrix.columns if c != "cohort_size"}
+    formats["cohort_size"] = "{:,.0f}"
+    st.dataframe(matrix.style.format(formats, na_rep="—"), use_container_width=True)
 
     summary = retention.summary_retention(con)
     st.subheader("Mature-cohort summary")
@@ -153,7 +217,13 @@ with tabs[2]:
         use_container_width=True,
     )
     col2.plotly_chart(
-        px.bar(seg, x="frequency_segment", y="total_amount", title="Volume by segment"),
+        px.bar(
+            seg,
+            x="frequency_segment",
+            y="total_amount",
+            log_y=True,
+            title="Gross volume by segment (log scale)",
+        ),
         use_container_width=True,
     )
 
@@ -166,23 +236,32 @@ with tabs[2]:
     e4.metric("Avg active days", f"{engagement['avg_active_days']:.2f}")
 
     st.subheader("Transfer value distribution")
-    st.caption("Event-level, excludes self-transfers. Heavy right tail — log scale below.")
-    values = con.execute("SELECT amount FROM stg_transfers WHERE NOT is_self_transfer").fetchdf()
+    st.caption(
+        "Event-level, excludes self-transfers and zero-amount transfers. Quarter-decade log "
+        "bins, log-scaled axes — the distribution spans many orders of magnitude."
+    )
+    hist = cached_value_histogram(con, VERSION)
     st.plotly_chart(
-        px.histogram(values, x="amount", log_y=True, nbins=80), use_container_width=True
+        px.bar(hist, x="bin_start", y="transfers", log_x=True, log_y=True),
+        use_container_width=True,
     )
 
 # --- Concentration ------------------------------------------------------
 with tabs[3]:
     summary = concentration.concentration_summary(con).iloc[0]
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Gini coefficient", f"{summary['gini_coefficient']:.3f}")
-    c2.metric("Top 1% volume share", f"{summary['top1pct_volume_share']:.1%}")
-    c3.metric("Top 10% volume share", f"{summary['top10pct_volume_share']:.1%}")
-    c4.metric("Top 10% tx-count share", f"{summary['top10pct_transaction_share']:.1%}")
+    c1.metric("Gini coefficient", f"{summary['gini_coefficient']:.4f}")
+    c2.metric("Top 1% volume share", f"{summary['top1pct_volume_share']:.2%}")
+    c3.metric("Top 10% volume share", f"{summary['top10pct_volume_share']:.2%}")
+    c4.metric("Top 10% tx-count share", f"{summary['top10pct_transaction_share']:.2%}")
+    st.caption(
+        "Shares are of per-wallet gross volume (sender and receiver legs both count), over every "
+        "address that transacted — externally owned accounts, contracts, and exchanges are not "
+        "distinguished. See docs/METRICS.md."
+    )
 
     st.subheader("Lorenz curve")
-    lorenz = concentration.lorenz_curve(con)
+    lorenz = cached_lorenz(con, VERSION)
     fig = go.Figure()
     fig.add_trace(
         go.Scatter(

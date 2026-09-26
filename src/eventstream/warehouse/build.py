@@ -36,7 +36,10 @@ def run_sql_models(
 ) -> dict[str, int]:
     row_counts: dict[str, int] = {}
     for rel_path in models or ALL_MODELS:
-        sql_text = (sql_root / rel_path).read_text()
+        # Explicit UTF-8: the SQL files contain non-ASCII punctuation (em-dashes in
+        # comments), and the locale default (e.g. cp949 on Korean-locale Windows)
+        # cannot decode it.
+        sql_text = (sql_root / rel_path).read_text(encoding="utf-8")
         con.execute(sql_text)
         table_name = Path(rel_path).stem
         row = con.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()

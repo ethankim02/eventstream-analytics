@@ -1,12 +1,19 @@
 -- First-seen weekly cohort retention matrix, with explicit right-censoring
 -- handling via `is_mature`: a (cohort_week, week_offset) cell is only
--- "mature" if cohort_week + week_offset weeks has fully elapsed within the
--- observed data window. Consumers (eventstream.analytics.retention) must
--- exclude immature cells before averaging W1/W4/W8-style summaries — see
--- docs/METRICS.md "Censoring" and docs/DECISIONS.md.
+-- "mature" if the WHOLE target week (cohort_week + week_offset) lies inside the
+-- observed data window, i.e. the target week's end is at or before the end of
+-- the last observed calendar day. A week the window only partly covers (say
+-- data ends on a Thursday) is therefore immature: counting it as observed would
+-- score wallets that simply had no chance to return yet as non-returners.
+-- Consumers (eventstream.analytics.retention) must exclude immature cells
+-- before averaging W1/W4/W8-style summaries — see docs/METRICS.md "Censoring"
+-- and docs/DECISIONS.md.
 CREATE OR REPLACE TABLE mart_retention_cohorts AS
 WITH bounds AS (
-    SELECT MAX(activity_week) AS max_observed_week FROM int_wallet_activity_weeks
+    -- End of the last observed calendar day (that day is assumed complete, so
+    -- end a live window on a UTC midnight; see docs/DATA_SOURCE.md).
+    SELECT DATE_TRUNC('day', MAX(block_timestamp)) + INTERVAL 1 DAY AS observed_end
+    FROM stg_transfers
 ),
 cohort AS (
     SELECT wallet_address, first_seen_week AS cohort_week
@@ -37,7 +44,12 @@ SELECT
     r.week_offset,
     r.retained_wallets,
     ROUND(r.retained_wallets * 1.0 / cs.cohort_size, 4) AS retention_rate,
-    (r.cohort_week + INTERVAL (r.week_offset) WEEK) <= b.max_observed_week AS is_mature
+    -- Offset 0 is the cohort's own week: membership is defined by activity in it, so it
+    -- cannot be censored even when that week is partial.
+    (
+        r.week_offset = 0
+        OR (r.cohort_week + INTERVAL (r.week_offset + 1) WEEK) <= b.observed_end
+    ) AS is_mature
 FROM retained r
 JOIN cohort_sizes cs USING (cohort_week)
 CROSS JOIN bounds b
