@@ -1,0 +1,252 @@
+{
+  "activation": {
+    "W2": {
+      "activated_return_rate": null,
+      "activated_wallets": 0,
+      "lift_ratio": null,
+      "mature_only": true,
+      "non_activated_return_rate": null,
+      "non_activated_wallets": 0,
+      "opening_cohort_excluded": false,
+      "week_offset": 2
+    },
+    "W4": {
+      "activated_return_rate": null,
+      "activated_wallets": 0,
+      "lift_ratio": null,
+      "mature_only": true,
+      "non_activated_return_rate": null,
+      "non_activated_wallets": 0,
+      "opening_cohort_excluded": false,
+      "week_offset": 4
+    }
+  },
+  "activation_share_of_all_wallets": 0.2296496115,
+  "anomalies": {
+    "days_observed": 2,
+    "evaluable_metric_days": 0,
+    "flagged": 0,
+    "metrics": 4
+  },
+  "caveats": {
+    "active_wallets_either_side": 408518,
+    "active_wallets_moving_at_least_1_usdc": 286422,
+    "events_in_multi_transfer_transactions_share": 0.5840049393,
+    "max_transfer_logs_in_one_transaction": 430,
+    "qualifying_events": 5653996,
+    "sender_only_active_wallets": 312111,
+    "transactions": 3288501,
+    "under_1_usdc_events": 1439548,
+    "under_1_usdc_share": 0.254607184,
+    "zero_amount_events": 200481,
+    "zero_amount_share": 0.03545828472
+  },
+  "cohorts": [
+    {
+      "cohort_week": "2026-09-14",
+      "opening": true,
+      "rates": {
+        "0": 1.0
+      },
+      "share_of_all_wallets": 1.0,
+      "size": 408518
+    }
+  ],
+  "concentration": {
+    "gini_coefficient": 0.9998931718,
+    "top10pct_transaction_share": 0.9158403275,
+    "top10pct_volume_share": 0.9999247954,
+    "top1pct_volume_share": 0.9993121064
+  },
+  "daily": [
+    {
+      "active_wallets": 266096,
+      "date": "2026-09-19",
+      "median_amount": 33.21521,
+      "p90_amount": 24057.66943,
+      "p99_amount": 1309891.648,
+      "transfers": 2931362,
+      "volume": 139009311200.0,
+      "weekday": "Sat"
+    },
+    {
+      "active_wallets": 236238,
+      "date": "2026-09-20",
+      "median_amount": 32.406461,
+      "p90_amount": 29567.97127,
+      "p99_amount": 721192.5536,
+      "transfers": 2722634,
+      "volume": 93307395420.0,
+      "weekday": "Sun"
+    }
+  ],
+  "dataset": {
+    "distinct_wallets_any_event": 408534,
+    "distinct_wallets_qualifying": 408518,
+    "first_event_at": "2026-09-19T00:00:01+00:00",
+    "last_event_at": "2026-09-20T23:59:59+00:00",
+    "max_block": 51579726,
+    "min_block": 51493327,
+    "networks": "base-mainnet",
+    "qualifying_events": 5653996,
+    "raw_events": 5670488,
+    "self_transfer_events": 16492,
+    "sources": "base_rpc_live"
+  },
+  "days_observed": 2,
+  "engagement": {
+    "avg_active_days": 1.229649612,
+    "avg_events_per_wallet": 27.68052326,
+    "median_active_days": 1.0,
+    "median_events_per_wallet": 2.0,
+    "repeat_wallet_rate": 0.7558859096
+  },
+  "funnel": [
+    {
+      "denominator": 408518,
+      "rate": 1.0,
+      "stage": "first_event",
+      "wallets": 408518
+    },
+    {
+      "denominator": 408518,
+      "rate": 0.7558859096,
+      "stage": "second_event",
+      "wallets": 308793
+    },
+    {
+      "denominator": 408518,
+      "rate": 0.2296496115,
+      "stage": "active_second_distinct_day",
+      "wallets": 93816
+    },
+    {
+      "denominator": 0,
+      "rate": null,
+      "stage": "active_after_7d",
+      "wallets": 0
+    },
+    {
+      "denominator": 0,
+      "rate": null,
+      "stage": "active_after_30d",
+      "wallets": 0
+    }
+  ],
+  "high_volume_wallets": 40852,
+  "retention": {
+    "immature_cells_by_offset": {
+      "0": 0
+    },
+    "max_offset_with_any_mature_cell": 0,
+    "pooled": {
+      "1": {
+        "cohort_wallets": 0,
+        "mature_cohorts": 0,
+        "rate": null
+      },
+      "2": {
+        "cohort_wallets": 0,
+        "mature_cohorts": 0,
+        "rate": null
+      },
+      "4": {
+        "cohort_wallets": 0,
+        "mature_cohorts": 0,
+        "rate": null
+      }
+    },
+    "weekly_retention_measurable": false
+  },
+  "segment_cutoffs": {
+    "p50_events": 2.0,
+    "p90_amount": 1122.380576,
+    "p90_events": 10.0
+  },
+  "segments": [
+    {
+      "event_share": 0.9062285329,
+      "events": 10247625.0,
+      "gross_volume": 460446657800.0,
+      "segment": "high_frequency",
+      "volume_share": 0.990989121,
+      "wallet_share": 0.08783945873,
+      "wallets": 35884
+    },
+    {
+      "event_share": 0.06485855314,
+      "events": 733420.0,
+      "gross_volume": 3583022637.0,
+      "segment": "repeat",
+      "volume_share": 0.007711504455,
+      "wallet_share": 0.3899412021,
+      "wallets": 159298
+    },
+    {
+      "event_share": 0.02009393003,
+      "events": 227222.0,
+      "gross_volume": 583275261.6,
+      "segment": "occasional",
+      "volume_share": 0.001255345063,
+      "wallet_share": 0.2781052487,
+      "wallets": 113611
+    },
+    {
+      "event_share": 0.008818983954,
+      "events": 99725.0,
+      "gross_volume": 20457560.07,
+      "segment": "one_time",
+      "volume_share": 4.402946384e-05,
+      "wallet_share": 0.2441140904,
+      "wallets": 99725
+    }
+  ],
+  "top_wallet_volume_share": {
+    "1": 0.3856383205,
+    "10": 0.9189030372,
+    "100": 0.9899747758
+  },
+  "total_volume": 232316706600.0,
+  "value_distribution": {
+    "max_amount": 219060611.5,
+    "mean_amount": 41088.94075,
+    "median_amount": 32.89,
+    "p10_amount": 0.001906,
+    "p50_amount": 32.89,
+    "p90_amount": 25665.35362,
+    "p99_amount": 1029351.558
+  },
+  "wallet_extremes": {
+    "max_active_days": 2,
+    "max_events": 425589,
+    "one_event_wallets": 99725
+  },
+  "weekly": [
+    {
+      "active_wallets": 408518,
+      "days_covered": 2,
+      "median_amount": 32.89,
+      "transfers": 5653996,
+      "volume": 232316706600.0,
+      "week_start": "2026-09-14"
+    }
+  ],
+  "window": {
+    "chain_id": 8453,
+    "end_block": 51579726,
+    "first_event_timestamp": "2026-09-19T00:00:01+00:00",
+    "keys_unique": true,
+    "last_event_timestamp": "2026-09-20T23:59:59+00:00",
+    "network": "base-mainnet",
+    "row_count": 5670488,
+    "rpc_url": "https://mainnet.base.org",
+    "segments": 44,
+    "segments_tile_window": true,
+    "source": "base_rpc_live",
+    "source_manifest": "usdc_transfers_49765327_51579726.manifest.json",
+    "source_manifest_complete": false,
+    "start_block": 51493327,
+    "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    "warehouse_rows_match_window_file": true
+  }
+}

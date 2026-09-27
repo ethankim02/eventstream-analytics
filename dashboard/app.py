@@ -176,6 +176,18 @@ with tabs[1]:
     st.dataframe(matrix.style.format(formats, na_rep="—"), use_container_width=True)
 
     summary = retention.summary_retention(con)
+    if int(summary["mature_cohorts"].sum()) == 0:
+        first_day, last_day, n_days = con.execute(
+            "SELECT MIN(activity_date), MAX(activity_date), COUNT(*) FROM mart_daily_metrics"
+        ).fetchone()
+        st.info(
+            f"**Weekly retention is not measurable in this window.** A cohort's W1 return needs "
+            f"the whole following UTC week inside the data, but this window covers only {n_days} "
+            f"day(s) ({first_day:%Y-%m-%d} → {last_day:%Y-%m-%d}). Every offset ≥ 1 is "
+            "right-censored, so it is excluded rather than counted as a non-return; only "
+            "offset 0 (the cohort's own week) is shown.",
+            icon="⏳",
+        )
     st.subheader("Mature-cohort summary")
     st.dataframe(summary, use_container_width=True)
 
@@ -278,9 +290,19 @@ with tabs[3]:
 
     st.subheader("Concentration over time")
     by_week = concentration.concentration_by_week(con)
-    st.plotly_chart(
-        px.line(by_week, x="activity_week", y="top10pct_volume_share"), use_container_width=True
-    )
+    if len(by_week) < 2:
+        # A one-point line chart draws nothing; show the value instead of an empty axis.
+        st.info(
+            "A trend needs at least two weeks; this window has one (possibly partial) week. "
+            f"Top-10% volume share for week starting {by_week['activity_week'].iloc[0]:%Y-%m-%d}: "
+            f"{by_week['top10pct_volume_share'].iloc[0]:.2%}.",
+            icon="⏳",
+        )
+    else:
+        st.plotly_chart(
+            px.line(by_week, x="activity_week", y="top10pct_volume_share"),
+            use_container_width=True,
+        )
 
 # --- Experiments (SYNTHETIC ONLY) ---------------------------------------
 with tabs[4]:
@@ -346,6 +368,15 @@ with tabs[5]:
         "entirely in SQL (sql/marts/mart_anomalies.sql). See docs/METRICS.md for method rationale."
     )
     anomalies = anomalies_from_warehouse(con)
+    if int(anomalies["rolling_mad"].notna().sum()) == 0:
+        n_days = anomalies["activity_date"].nunique()
+        st.info(
+            f"**No day can be scored in this window.** The baseline is the median of a full "
+            f"7-day trailing window, and the MAD needs that baseline for the days before it; "
+            f"this window has only {n_days} day(s), so nothing is flagged. The lines below "
+            "show the raw daily values.",
+            icon="⏳",
+        )
     metric_choice = st.selectbox("Metric", sorted(anomalies["metric_name"].unique()))
     subset = anomalies[anomalies["metric_name"] == metric_choice]
 
