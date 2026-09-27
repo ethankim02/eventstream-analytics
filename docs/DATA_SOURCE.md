@@ -72,35 +72,84 @@ than hard-coding a guessed number:
 This means the exact provider-side limit doesn't need to be known in advance
 for ingestion to complete correctly — it self-adjusts.
 
-## Why this environment could not run live ingestion
+## What was actually extracted
 
-This project's cloud sandbox denies outbound network access to
-`mainnet.base.org` by policy (confirmed via a direct connectivity test: the
-egress proxy returned a policy-denial `403` on the CONNECT tunnel). The live
-ingestion code path (`eventstream.ingestion.live`) is implemented and unit/
-integration-tested against a mocked RPC client, but has not been exercised
-against the real endpoint from this environment.
+Live ingestion **has been run against `mainnet.base.org`** (an earlier revision of this file,
+written before that was possible, said otherwise). The planned range was blocks
+`49,765,327 – 51,579,726` (about 42 days, 908 segments of 2,000 blocks). The pull started
+2026-09-26 17:59 UTC and was **stopped deliberately** at 2026-09-27 04:42 UTC after 617 segments:
+1,232,400 contiguous blocks (`50,347,327 – 51,579,726`), **103,268,795 events**, from
+2026-08-23 11:20 UTC to 2026-09-20 23:59:59 UTC, about 5.3 GB of Parquet. The rest was dropped
+because analysing 100M+ events is beyond what this portfolio project needs (see
+`docs/DECISIONS.md`, "Bounded real-data window"). The extraction is checkpointed and the manifest
+records `complete: false`, so the same command resumes it. It is kept out of git (`data/raw/` is
+ignored); the published numbers come from a bounded window cut from it.
 
-**To pull real data locally** (once you have normal internet access):
+## The analysis window
+
+| Field | Value |
+|---|---|
+| Blocks | `51,493,327 – 51,579,726` (86,400 blocks = exactly 2 UTC days at 2 s/block) |
+| First / last event | 2026-09-19 00:00:01 UTC (Sat) / 2026-09-20 23:59:59 UTC (Sun) |
+| Events | 5,670,488 (5,653,996 qualifying; 16,492 self-transfers retained but excluded) |
+| Segments | 44 whole segments, proven contiguous and non-overlapping before use |
+| Wallets | 408,518 distinct addresses with a qualifying event |
+
+The window starts and ends on UTC midnights, so both days are complete (the retention and
+funnel censoring logic assumes the last observed calendar day is whole). Every number below
+and in the README is in [`real_data_findings.json`](real_data_findings.json), which
+`scripts/build_findings.py` writes from the warehouse (rerunning it on the same window rewrites
+the same bytes). Data-quality and independent reconciliation checks against the raw window all
+pass.
+
+### Measured properties of this data
+
+- **Heavy right tail.** Median transfer 32.89 USDC; mean
+  41,089 USDC; p90 25,665; p99 1,029,352; largest
+  219,060,612. Gross event volume over the two days is
+  $232.3B, so it says little about typical behaviour.
+- **Dust and zero-value transfers.** 3.5% of qualifying events carry a
+  zero amount and 25.5% are under 1 USDC. "Active wallets" therefore
+  includes passive counterparties: 408,518 wallets appear on either
+  side of a transfer, 312,111 sent at least once, and
+  286,422 were party to a transfer of at least 1 USDC.
+- **Multi-log transactions.** 58.4% of events sit
+  in a transaction that emits more than one USDC `Transfer` log (up to
+  430 in one transaction; 3,288,501
+  transactions in all), so volume counts every hop.
+- **Concentration.** One wallet holds 38.6% of gross per-wallet
+  volume, the top 10 hold 91.9% and the top 100
+  99.0% (Gini 0.9999).
+  These are pooled addresses: contracts, routers, pools and exchanges are not distinguished from
+  externally owned accounts.
+
+## Reproducing it
 
 ```bash
-uv sync
-uv run eventstream ingest --mode live --start-block <START> --end-block <END>
-uv run eventstream transform --source-glob "data/raw/*.parquet"
-uv run eventstream validate
-uv run eventstream analyze
+# 1. Download just the window (needs network; about an hour at the public endpoint's observed
+#    rate of ~1.3 minutes per 2,000-block segment with 6 workers). Skip this if the segments
+#    are already in data/raw/.
+uv run eventstream ingest --mode live --start-block 51493327 --end-block 51579726 --workers 6
+
+# 2. Everything else runs offline and finishes in one to three minutes:
+python scripts/run_real_analysis.py
 ```
 
-Pick `--start-block`/`--end-block` for roughly a 7–30 day window (see
-`docs/DECISIONS.md` for how to size that from Base's ~2-second block time).
-You can find a current block number by querying `eth_blockNumber` against
-`https://mainnet.base.org`, or by using an explorer (e.g. basescan.org).
+`run_real_analysis.py` runs `extract-window` → `transform --no-global-dedup` → `validate
+--reconcile-glob` → `analyze` → `build_findings.py` and prints per-step wall-clock times. Set
+`EVENTSTREAM_DUCKDB_MEMORY_LIMIT` (for example `4GB`) if the machine has little free RAM (see
+`.env.example`). Use a different `--start-block/--end-block` for another window; the extractor
+refuses any range that is not covered by intact, contiguous segments. If `data/raw/` holds more
+than one manifest (for example this project's larger one and your own), pass `--manifest`.
 
-## What ships in this repository instead
+Dashboard screenshots: `python scripts/capture_dashboard.py data/processed/base_usdc_real.duckdb
+docs/assets/real` (needs Playwright; see the script's docstring).
 
-Since real ingestion could not be executed from this sandbox, this repository
-ships (and its CI, tests, and demo run entirely on) a **deterministic
-synthetic fixture** (`eventstream.ingestion.fixtures`, `eventstream ingest
---mode fixture`), explicitly tagged `source = "synthetic_fixture"` end to end
-so it can never be mistaken for real on-chain activity. See the root README
-for how any quantitative "finding" is labeled accordingly.
+## What CI and the demo run on
+
+CI, `eventstream demo` and the test suite need no network. They run on a **deterministic
+synthetic fixture** (`eventstream.ingestion.fixtures`, `eventstream ingest --mode fixture`)
+plus a small committed sample of real events (`data/samples/`, 200 blocks, independently
+re-verified against the RPC). Synthetic rows are tagged `source = "synthetic_fixture"` end to
+end and the dashboard shows a warning banner for them, so they cannot be mistaken for on-chain
+activity; the README labels every figure with the data it came from.

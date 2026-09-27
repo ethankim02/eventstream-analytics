@@ -1,5 +1,7 @@
 """Fixture -> DuckDB -> SQL models -> analytics: full pipeline integration tests."""
 
+import pandas as pd
+
 from eventstream.analytics import concentration, lifecycle, retention, segmentation
 from eventstream.analytics.anomalies import anomalies_from_warehouse
 
@@ -75,7 +77,7 @@ def test_summary_retention_only_uses_mature_cohorts(built_con):
     summary = retention.summary_retention(built_con, offsets=(1, 2, 4, 8))
     for _, row in summary.iterrows():
         if row["mature_cohorts"] == 0:
-            assert row["avg_retention_rate"] is None
+            assert pd.isna(row["avg_retention_rate"])  # None becomes NaN inside a DataFrame
         else:
             assert 0.0 <= row["avg_retention_rate"] <= 1.0
 
@@ -155,3 +157,180 @@ def test_activation_comparison_returns_valid_rates(built_con):
     for rate in (comparison.activated_return_rate, comparison.non_activated_return_rate):
         if rate is not None:
             assert 0.0 <= rate <= 1.0
+
+
+# --- Regression tests for defects found while running on real data -----------------
+# Each compares the SQL models with an independent pandas computation straight from
+# the raw events, so a wrong window or a wrong join shows up as a numeric mismatch.
+
+
+def _wallet_days(df: pd.DataFrame) -> pd.DataFrame:
+    """One row per (wallet, UTC day) with >=1 qualifying event, both legs of each transfer."""
+    ev = df[~df["is_self_transfer"]]
+    legs = pd.concat(
+        [
+            ev[["from_address", "block_timestamp"]].set_axis(["wallet", "ts"], axis=1),
+            ev[["to_address", "block_timestamp"]].set_axis(["wallet", "ts"], axis=1),
+        ]
+    )
+    legs["day"] = legs["ts"].dt.floor("D")
+    return legs
+
+
+def test_activation_window_counts_the_first_seen_day(built_con, small_fixture_df):
+    """Documented rule (METRICS.md): >=2 distinct days within days 0-6, first-seen day included."""
+    legs = _wallet_days(small_fixture_df)
+    first_day = legs.groupby("wallet")["ts"].min().dt.floor("D").rename("first_day")
+    days = legs.drop_duplicates(["wallet", "day"]).join(first_day, on="wallet")
+    in_window = days[
+        (days["day"] >= days["first_day"])
+        & (days["day"] < days["first_day"] + pd.Timedelta(days=7))
+    ]
+    expected = in_window.groupby("wallet")["day"].nunique()
+
+    sql = (
+        built_con.execute(
+            "SELECT wallet_address, distinct_days_in_first_7d, is_activated FROM int_wallet_activation"
+        )
+        .fetchdf()
+        .set_index("wallet_address")
+    )
+    assert len(sql) == len(expected)
+    assert (sql["distinct_days_in_first_7d"] == expected.reindex(sql.index)).all()
+    assert ((sql["distinct_days_in_first_7d"] >= 2) == sql["is_activated"]).all()
+
+
+def test_funnel_flags_match_independent_reference(built_con, small_fixture_df):
+    legs = _wallet_days(small_fixture_df)
+    g = legs.groupby("wallet")
+    ref = pd.DataFrame(
+        {
+            "events": g.size(),
+            "active_days": g["day"].nunique(),
+            "first_day": g["ts"].min().dt.floor("D"),
+            "last_day": g["day"].max(),
+        }
+    )
+    ref["has_second_event"] = ref["events"] >= 2
+    ref["second_day"] = ref["active_days"] >= 2
+    ref["after_7d"] = ref["last_day"] >= ref["first_day"] + pd.Timedelta(days=7)
+    ref["after_30d"] = ref["last_day"] >= ref["first_day"] + pd.Timedelta(days=30)
+
+    sql = (
+        built_con.execute("SELECT * FROM int_wallet_funnel_flags")
+        .fetchdf()
+        .set_index("wallet_address")
+    )
+    assert len(sql) == len(ref)  # one row per wallet, no join fan-out
+    ref = ref.reindex(sql.index)
+    assert (sql["has_second_event"].astype(bool) == ref["has_second_event"]).all()
+    assert (sql["active_second_distinct_day"].astype(bool) == ref["second_day"]).all()
+    assert (sql["active_after_7d"].astype(bool) == ref["after_7d"]).all()
+    assert (sql["active_after_30d"].astype(bool) == ref["after_30d"]).all()
+
+
+def test_final_partial_week_is_not_treated_as_observed(built_con, small_fixture_df):
+    last_ts = small_fixture_df["block_timestamp"].max()
+    assert last_ts.dayofweek != 6  # the shared fixture ends mid-week, which is the point
+    observed_end = last_ts.floor("D") + pd.Timedelta(days=1)
+    cells = built_con.execute(
+        "SELECT cohort_week, week_offset, is_mature FROM mart_retention_cohorts"
+    ).fetchdf()
+    target_end = cells["cohort_week"] + pd.to_timedelta((cells["week_offset"] + 1) * 7, unit="D")
+    expected = (cells["week_offset"] == 0) | (target_end <= observed_end)  # W0 is never censored
+    assert (cells["is_mature"] == expected).all()
+    assert not cells[cells["is_mature"]]["cohort_week"].empty  # ...but earlier weeks still mature
+
+
+def _tiny_warehouse(tmp_path, events):
+    """Build a warehouse from [(iso_timestamp, from_int, to_int)] events."""
+    from datetime import UTC, datetime
+
+    from eventstream.ingestion.normalize import build_event_row, rows_to_dataframe
+    from eventstream.warehouse.build import build_warehouse
+    from eventstream.warehouse.connection import connect_memory
+
+    rows = []
+    for i, (ts, frm, to) in enumerate(events):
+        transfer = {
+            "block_number": i + 1,
+            "transaction_hash": "0x" + f"{i:064x}",
+            "log_index": 0,
+            "token_address": "0x833589fcd6edb6e08f4c7c32d4f71b54bda02913",
+            "from_address": "0x" + f"{frm:040x}",
+            "to_address": "0x" + f"{to:040x}",
+            "raw_amount": 1_000_000,
+        }
+        rows.append(
+            build_event_row(
+                transfer,  # type: ignore[arg-type]
+                datetime.fromisoformat(ts).replace(tzinfo=UTC),
+                8453,
+                "base-mainnet",
+                "base_rpc_live",
+                6,
+            )
+        )
+    path = tmp_path / "tiny.parquet"
+    rows_to_dataframe(rows).to_parquet(path, index=False)
+    con = connect_memory()
+    build_warehouse(con, str(path), SQL_ROOT)
+    return con
+
+
+SQL_ROOT = __import__("pathlib").Path(__file__).resolve().parents[2] / "sql"
+
+# 2026-06-01 is a Monday. Wallets 1&2 first appear in week 0 and return in week 2 (2026-06-15).
+_BASE_EVENTS = [
+    ("2026-06-01T10:00:00", 1, 2),
+    ("2026-06-15T10:00:00", 1, 2),
+]
+
+
+def test_retention_cell_is_mature_when_window_ends_exactly_on_week_boundary(tmp_path):
+    events = [*_BASE_EVENTS, ("2026-06-21T23:59:59", 8, 9)]  # Sunday, last second of week 2
+    con = _tiny_warehouse(tmp_path, events)
+    cell = con.execute(
+        "SELECT is_mature, retained_wallets FROM mart_retention_cohorts "
+        "WHERE cohort_week = TIMESTAMPTZ '2026-06-01 00:00:00+00' AND week_offset = 2"
+    ).fetchone()
+    assert cell == (True, 2)
+
+
+def test_retention_cell_is_immature_when_window_ends_mid_week(tmp_path):
+    events = [*_BASE_EVENTS, ("2026-06-18T23:59:59", 8, 9)]  # Thursday: week 2 only 4/7 observed
+    con = _tiny_warehouse(tmp_path, events)
+    is_mature = con.execute(
+        "SELECT is_mature FROM mart_retention_cohorts "
+        "WHERE cohort_week = TIMESTAMPTZ '2026-06-01 00:00:00+00' AND week_offset = 2"
+    ).fetchone()[0]
+    assert is_mature is False
+    # ...and week 1 (fully observed) is still mature
+    assert con.execute(
+        "SELECT bool_and(is_mature) FROM mart_retention_cohorts WHERE week_offset <= 1"
+    ).fetchone()[0]
+
+
+def test_activation_comparison_can_exclude_the_opening_cohort(built_con):
+    pooled = lifecycle.activation_vs_retention(built_con, week_offset=1)
+    later_only = lifecycle.activation_vs_retention(
+        built_con, week_offset=1, exclude_opening_cohort=True
+    )
+    assert later_only.opening_cohort_excluded and not pooled.opening_cohort_excluded
+    n_pooled = pooled.activated_wallets + pooled.non_activated_wallets
+    n_later = later_only.activated_wallets + later_only.non_activated_wallets
+    assert 0 < n_later < n_pooled  # the opening cohort's wallets were removed, and only those
+
+    opening_week = built_con.execute(
+        "SELECT MIN(first_seen_week) FROM int_wallet_first_seen"
+    ).fetchone()[0]
+    n_opening_mature = built_con.execute(
+        "SELECT COUNT(*) FROM int_wallet_first_seen WHERE first_seen_week = ?", [opening_week]
+    ).fetchone()[0]
+    assert n_pooled - n_later == n_opening_mature
+
+
+def test_segment_cutoffs_are_ordered(built_con):
+    cutoffs = segmentation.segment_cutoffs(built_con).iloc[0]
+    assert 1 <= cutoffs["p50_events"] <= cutoffs["p90_events"]
+    assert cutoffs["p90_amount"] > 0

@@ -21,6 +21,20 @@ def segment_distribution(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     ).fetchdf()
 
 
+def segment_cutoffs(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """The data-derived thresholds `mart_wallet_segments` used, recomputed the same way,
+    so a reported segment table can state the cutoffs it depends on."""
+    return con.execute(
+        """
+        SELECT
+            quantile_cont(total_events, 0.50) AS p50_events,
+            quantile_cont(total_events, 0.90) AS p90_events,
+            quantile_cont(total_amount, 0.90) AS p90_amount
+        FROM int_wallet_lifecycle
+        """
+    ).fetchdf()
+
+
 def engagement_summary(con: duckdb.DuckDBPyConnection) -> dict:
     row = (
         con.execute(
@@ -47,10 +61,10 @@ def value_distribution(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         SELECT
             MEDIAN(amount) AS median_amount,
             AVG(amount) AS mean_amount,
-            approx_quantile(amount, 0.10) AS p10_amount,
-            approx_quantile(amount, 0.50) AS p50_amount,
-            approx_quantile(amount, 0.90) AS p90_amount,
-            approx_quantile(amount, 0.99) AS p99_amount,
+            quantile_cont(amount, 0.10) AS p10_amount,
+            quantile_cont(amount, 0.50) AS p50_amount,
+            quantile_cont(amount, 0.90) AS p90_amount,
+            quantile_cont(amount, 0.99) AS p99_amount,
             MAX(amount) AS max_amount
         FROM stg_transfers
         WHERE NOT is_self_transfer

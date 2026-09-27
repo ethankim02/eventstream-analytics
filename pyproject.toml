@@ -29,7 +29,7 @@ dev = [
 ]
 
 [project.scripts]
-eventstream = "eventstream.cli:app"
+eventstream = "eventstream.cli:main"
 
 [build-system]
 requires = ["hatchling"]

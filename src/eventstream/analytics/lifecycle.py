@@ -23,14 +23,25 @@ class ActivationComparison:
     lift_ratio: float | None
     week_offset: int
     mature_only: bool
+    opening_cohort_excluded: bool = False
 
 
 def activation_vs_retention(
-    con: duckdb.DuckDBPyConnection, week_offset: int = 4
+    con: duckdb.DuckDBPyConnection,
+    week_offset: int = 4,
+    exclude_opening_cohort: bool = False,
 ) -> ActivationComparison:
     """Compare mature-cohort W{week_offset} observed return between wallets
     that did/didn't satisfy the activation proxy (>=2 distinct active days
-    in their first 7 observed days).
+    within their first 7 calendar days, first-seen day included).
+
+    `exclude_opening_cohort` drops the window's first cohort week, which is
+    dominated by wallets already active before observation began (left-censored)
+    and so is not a first-seen cohort in any meaningful sense.
+
+    Use week_offset >= 2 for interpretation: the activation window spans days
+    0-6, so at offset 1 it can overlap the outcome week and the association is
+    partly mechanical.
     """
     query = """
         WITH mature AS (
@@ -41,8 +52,15 @@ def activation_vs_retention(
                     SELECT
                         fs.wallet_address,
                         fs.first_seen_week AS cohort_week,
-                        (fs.first_seen_week + INTERVAL (?) WEEK) <= (SELECT MAX(activity_week) FROM int_wallet_activity_weeks) AS is_mature
+                        -- same rule as mart_retention_cohorts: the whole target week is observed
+                        (fs.first_seen_week + INTERVAL (?) WEEK) <= (
+                            SELECT DATE_TRUNC('day', MAX(block_timestamp)) + INTERVAL 1 DAY
+                            FROM stg_transfers
+                        ) AS is_mature
                     FROM int_wallet_first_seen fs
+                    WHERE NOT ? OR fs.first_seen_week > (
+                        SELECT MIN(first_seen_week) FROM int_wallet_first_seen
+                    )
                 )
                 WHERE is_mature
             )
@@ -62,7 +80,7 @@ def activation_vs_retention(
         LEFT JOIN returned r ON r.wallet_address = m.wallet_address
         GROUP BY act.is_activated
     """
-    df = con.execute(query, [week_offset, week_offset]).fetchdf()
+    df = con.execute(query, [week_offset + 1, exclude_opening_cohort, week_offset]).fetchdf()
 
     def _rate(is_activated: bool) -> tuple[int, float | None]:
         row = df[df["is_activated"] == is_activated]
@@ -88,6 +106,7 @@ def activation_vs_retention(
         lift_ratio=lift,
         week_offset=week_offset,
         mature_only=True,
+        opening_cohort_excluded=exclude_opening_cohort,
     )
 
 
@@ -99,37 +118,37 @@ def funnel_conversion(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     of the dataset's observed max date — otherwise a wallet first seen last
     week would count as a funnel drop-off it hasn't had time to avoid.
     """
-    df = con.execute("SELECT * FROM mart_lifecycle_funnel").fetchdf()
-    row = con.execute("SELECT MAX(block_timestamp) FROM stg_transfers").fetchone()
+    # Aggregated in the warehouse: this table has one row per wallet, which is
+    # millions of rows on real data, so it is never pulled into pandas.
+    row = con.execute(
+        """
+        WITH bound AS (SELECT MAX(block_timestamp) AS max_observed FROM stg_transfers)
+        SELECT
+            COUNT(*),
+            COALESCE(SUM(has_second_event), 0),
+            COALESCE(SUM(active_second_distinct_day), 0),
+            COUNT(*) FILTER (WHERE eligible_at_7d <= max_observed),
+            COALESCE(SUM(active_after_7d) FILTER (WHERE eligible_at_7d <= max_observed), 0),
+            COUNT(*) FILTER (WHERE eligible_at_30d <= max_observed),
+            COALESCE(SUM(active_after_30d) FILTER (WHERE eligible_at_30d <= max_observed), 0)
+        FROM mart_lifecycle_funnel, bound
+        """
+    ).fetchone()
     assert row is not None
-    max_observed = pd.Timestamp(row[0])
-
-    total = len(df)
-    eligible_7d = df[df["eligible_at_7d"] <= max_observed]
-    eligible_30d = df[df["eligible_at_30d"] <= max_observed]
+    total, second_event, second_day, elig_7d, active_7d, elig_30d, active_30d = (
+        int(v) for v in row
+    )
 
     stages = [
         {"stage": "first_event", "wallets": total, "eligible_denominator": total},
-        {
-            "stage": "second_event",
-            "wallets": int(df["has_second_event"].sum()),
-            "eligible_denominator": total,
-        },
+        {"stage": "second_event", "wallets": second_event, "eligible_denominator": total},
         {
             "stage": "active_second_distinct_day",
-            "wallets": int(df["active_second_distinct_day"].sum()),
+            "wallets": second_day,
             "eligible_denominator": total,
         },
-        {
-            "stage": "active_after_7d",
-            "wallets": int(eligible_7d["active_after_7d"].sum()),
-            "eligible_denominator": len(eligible_7d),
-        },
-        {
-            "stage": "active_after_30d",
-            "wallets": int(eligible_30d["active_after_30d"].sum()),
-            "eligible_denominator": len(eligible_30d),
-        },
+        {"stage": "active_after_7d", "wallets": active_7d, "eligible_denominator": elig_7d},
+        {"stage": "active_after_30d", "wallets": active_30d, "eligible_denominator": elig_30d},
     ]
     out = pd.DataFrame(stages)
     out["conversion_rate"] = out["wallets"] / out["eligible_denominator"].replace(0, pd.NA)

@@ -14,8 +14,8 @@ tx AS (
         COUNT(*) AS transfer_count,
         SUM(amount) AS total_volume,
         MEDIAN(amount) AS median_amount,
-        approx_quantile(amount, 0.90) AS p90_amount,
-        approx_quantile(amount, 0.99) AS p99_amount
+        quantile_cont(amount, 0.90) AS p90_amount,
+        quantile_cont(amount, 0.99) AS p99_amount
     FROM stg_transfers
     WHERE NOT is_self_transfer
     GROUP BY 1

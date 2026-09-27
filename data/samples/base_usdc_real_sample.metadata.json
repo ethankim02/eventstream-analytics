@@ -1,0 +1,17 @@
+{
+  "description": "Small contiguous slice of REAL Base mainnet native-USDC Transfer events, committed for network-free tests. Not the analysis dataset.",
+  "source": "base_rpc_live",
+  "network": "base-mainnet",
+  "chain_id": 8453,
+  "token_address": "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+  "rpc_url": "https://mainnet.base.org",
+  "start_block": 51428527,
+  "end_block": 51428726,
+  "start_block_timestamp": "2026-09-17T12:00:01+00:00",
+  "end_block_timestamp": "2026-09-17T12:06:39+00:00",
+  "row_count": 25218,
+  "self_transfer_rows": 7,
+  "cut_from_dataset_extraction_started_at": "2026-09-26T17:59:21.561692+00:00",
+  "sample_written_at": "2026-09-26T18:31:58.572487+00:00",
+  "independently_reverified_against_rpc": "re-fetched with eth_getLogs and normalized with the per-row reference path; identical on every column except ingested_at"
+}

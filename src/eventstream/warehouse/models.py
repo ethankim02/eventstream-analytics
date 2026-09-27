@@ -34,3 +34,10 @@ MART_MODELS = [
 ]
 
 ALL_MODELS = STAGING_MODELS + INTERMEDIATE_MODELS + MART_MODELS
+
+# Same pipeline with `stg_transfers` built without the global dedup window. Only valid for a
+# source already proven unique on (transaction_hash, log_index) — see `stg_transfers_disjoint.sql`.
+DISJOINT_MODELS = [
+    "staging/stg_transfers_disjoint.sql" if m == "staging/stg_transfers.sql" else m
+    for m in ALL_MODELS
+]

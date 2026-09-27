@@ -29,9 +29,9 @@ rather than "acquired," specifically to keep this honest.
 "Retention" implies a fully-elapsed observation window; this project instead
 reports **observed return rate**, and explicitly filters out any
 `(cohort, week_offset)` combination where that much time hasn't actually
-elapsed since the dataset's own most recent date (`is_mature` in
-`mart_retention_cohorts`). See `docs/METRICS.md` → "Censoring" for the exact
-rule and `docs/DECISIONS.md` for why.
+elapsed within the dataset's own observation window (`is_mature` in
+`mart_retention_cohorts`: the whole target week must be observed). See
+`docs/METRICS.md` → "Censoring" for the exact rule and `docs/DECISIONS.md` for why.
 
 ## Canonical event schema (`stg_transfers`)
 
@@ -39,14 +39,14 @@ rule and `docs/DECISIONS.md` for why.
 |---|---|---|
 | `event_id` | string | `{transaction_hash}-{log_index}`. Deterministic primary key. |
 | `block_number` | int | |
-| `block_timestamp` | timestamp (UTC) | Fetched via `eth_getBlockByNumber` for live ingestion. |
+| `block_timestamp` | timestamp (UTC) | Live ingestion takes the `blockTimestamp` the RPC attaches to each log (`eth_getBlockByNumber` is only a fallback for providers that omit it; an unresolvable block is an error, never a dropped event). |
 | `transaction_hash` | string | |
 | `log_index` | int | Position of this log within its transaction. |
 | `token_address` | string | Lower-cased; validated against the expected USDC contract (`eventstream validate`). |
 | `from_address` | string | Lower-cased 42-char hex (`0x` + 40 hex chars). |
 | `to_address` | string | Same format. |
 | `raw_amount` | int (base units) | The literal on-chain integer — **never** represented as a float. |
-| `amount` | float (human units) | `raw_amount / 10^decimals`, derived once during normalization via `Decimal` (see below), stored as a float for downstream SQL/analytics convenience. |
+| `amount` | float (human units) | `raw_amount / 10^decimals`, derived once during normalization (see below), stored as a float for downstream SQL/analytics convenience. |
 | `is_self_transfer` | bool | `from_address == to_address`. Retained, never dropped — see `docs/DECISIONS.md`. |
 | `chain_id` | int | `8453` for Base mainnet. |
 | `network` | string | e.g. `"base-mainnet"`. |
@@ -58,17 +58,29 @@ rule and `docs/DECISIONS.md` for why.
 can only emit one log at a given `log_index`. Deduplication
 (`eventstream.ingestion.normalize.rows_to_dataframe`, and again defensively
 in `sql/staging/stg_transfers.sql` via `ROW_NUMBER()`) uses exactly this key,
-so re-running an overlapping ingestion range is always safe.
+so re-running an overlapping ingestion range is always safe. For a real-data window cut from
+non-overlapping live segments (`eventstream extract-window`), `transform --no-global-dedup` builds
+`stg_transfers_disjoint.sql` instead — the same columns without the whole-table window function,
+which does not scale — and asserts the key is unique rather than assuming it; see
+`docs/DECISIONS.md`, "No global dedup for proven-disjoint segments".
 
 ### Decimals and monetary precision
 
 USDC uses 6 decimals on every chain it's issued on. The raw on-chain integer
 (`raw_amount`, base units — "1 USDC" is stored on-chain as `1_000_000`) is
 carried through ingestion untouched as a Python `int`. The human-readable
-`amount` is derived exactly once, using `decimal.Decimal`
-(`eventstream.ingestion.normalize.raw_amount_to_decimal`) — never a raw
-float division — specifically to avoid binary floating-point error
-accumulating into a financial figure before it's ever displayed.
+`amount` is derived exactly once. The reference implementation
+(`eventstream.ingestion.normalize.build_event_row`) uses `decimal.Decimal`; the vectorized
+bulk path used for live ingestion (`normalize.transfers_to_dataframe`) divides as a float
+only when `raw_amount < 2**53` — where the quotient is the correctly rounded value of the
+exact ratio, bit-identical to the `Decimal` result — and falls back to `Decimal` above that.
+`tests/unit/test_bulk_normalize_parity.py` asserts the two paths agree byte for byte.
+
+## First-seen day
+
+`int_wallet_first_seen` carries `first_seen_at` (timestamp), `first_seen_date` (its UTC
+calendar day, "day 0") and `first_seen_week`. Day-grain windows (activation, funnel) are
+anchored on `first_seen_date` because `activity_date` is truncated to midnight.
 
 ## Wallet-interaction table (`stg_wallet_events`)
 
