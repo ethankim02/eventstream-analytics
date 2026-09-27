@@ -27,9 +27,9 @@ def segment_cutoffs(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     return con.execute(
         """
         SELECT
-            approx_quantile(total_events, 0.50) AS p50_events,
-            approx_quantile(total_events, 0.90) AS p90_events,
-            approx_quantile(total_amount, 0.90) AS p90_amount
+            quantile_cont(total_events, 0.50) AS p50_events,
+            quantile_cont(total_events, 0.90) AS p90_events,
+            quantile_cont(total_amount, 0.90) AS p90_amount
         FROM int_wallet_lifecycle
         """
     ).fetchdf()
@@ -61,10 +61,10 @@ def value_distribution(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
         SELECT
             MEDIAN(amount) AS median_amount,
             AVG(amount) AS mean_amount,
-            approx_quantile(amount, 0.10) AS p10_amount,
-            approx_quantile(amount, 0.50) AS p50_amount,
-            approx_quantile(amount, 0.90) AS p90_amount,
-            approx_quantile(amount, 0.99) AS p99_amount,
+            quantile_cont(amount, 0.10) AS p10_amount,
+            quantile_cont(amount, 0.50) AS p50_amount,
+            quantile_cont(amount, 0.90) AS p90_amount,
+            quantile_cont(amount, 0.99) AS p99_amount,
             MAX(amount) AS max_amount
         FROM stg_transfers
         WHERE NOT is_self_transfer

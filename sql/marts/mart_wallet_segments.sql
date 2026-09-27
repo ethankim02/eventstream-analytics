@@ -14,9 +14,9 @@ WITH lifecycle AS (
 ),
 cutoffs AS (
     SELECT
-        approx_quantile(total_events, 0.50) AS p50_events,
-        approx_quantile(total_events, 0.90) AS p90_events,
-        approx_quantile(total_amount, 0.90) AS p90_amount
+        quantile_cont(total_events, 0.50) AS p50_events,
+        quantile_cont(total_events, 0.90) AS p90_events,
+        quantile_cont(total_amount, 0.90) AS p90_amount
     FROM lifecycle
 )
 SELECT
