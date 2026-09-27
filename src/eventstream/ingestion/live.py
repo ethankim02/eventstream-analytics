@@ -13,8 +13,9 @@ restarting. Segments never overlap, so no event can be ingested twice; a
 segment that cannot be fetched is reported and fails the run — it is never
 silently skipped.
 
-Requires outbound network access to the configured RPC endpoint, which is
-NOT available in every sandboxed environment (see docs/DATA_SOURCE.md).
+Requires outbound network access to the configured RPC endpoint. Nothing downstream of the
+download needs it: `eventstream extract-window` cuts a bounded window from the segments on
+disk (see docs/DATA_SOURCE.md).
 """
 
 from __future__ import annotations

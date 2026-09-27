@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from pathlib import Path
 
 import typer
 
@@ -13,9 +14,10 @@ from eventstream.analytics.anomalies import anomalies_from_warehouse
 from eventstream.experimentation import inference, power
 from eventstream.experimentation.simulator import SCENARIOS, generate_scenario
 from eventstream.ingestion.fixtures import write_fixture
+from eventstream.ingestion.window import WindowError, extract_window
 from eventstream.validation.checks import all_passed, run_checks
 from eventstream.validation.reconcile import reconcile_against_raw
-from eventstream.warehouse.build import build_warehouse
+from eventstream.warehouse.build import DuplicateEventsError, build_warehouse
 from eventstream.warehouse.connection import connect
 
 app = typer.Typer(add_completion=False, help="Product analytics and experimentation CLI.")
@@ -64,18 +66,64 @@ def ingest(
         raise typer.Exit(code=1)
 
 
+@app.command("extract-window")
+def extract_window_cmd(
+    start_block: int = typer.Option(..., help="First block of the window (inclusive)."),
+    end_block: int = typer.Option(..., help="Last block of the window (inclusive)."),
+    raw_dir: str = typer.Option(str(cfg.RAW_DIR), help="Directory holding the live segments."),
+    manifest: str = typer.Option("", help="Manifest to cut from (default: the only one)."),
+    out: str = typer.Option("", help="Output Parquet (default: data/processed/window_*)."),
+) -> None:
+    """Cut a contiguous block window out of already-downloaded segments (no network)."""
+    out_path = Path(out) if out else cfg.PROCESSED_DIR / f"window_{start_block}_{end_block}.parquet"
+    try:
+        report = extract_window(
+            Path(raw_dir), start_block, end_block, out_path, Path(manifest) if manifest else None
+        )
+    except WindowError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"Window blocks {start_block}..{end_block}: {report.row_count:,} events from "
+        f"{report.segments_used} segments in {report.elapsed_seconds:.1f}s"
+    )
+    typer.echo(f"  first event {report.first_event_timestamp.isoformat()}")
+    typer.echo(f"  last event  {report.last_event_timestamp.isoformat()}")
+    status = "unique" if report.keys_unique else "DUPLICATES PRESENT"
+    typer.echo(
+        f"  distinct (transaction_hash, log_index) keys: {report.distinct_keys:,} ({status})"
+    )
+    typer.echo(f"  wrote {report.parquet_path} and {report.metadata_path.name}")
+    if not report.keys_unique:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def transform(
     source_glob: str = typer.Option("", help="Override the raw Parquet glob to load."),
+    global_dedup: bool = typer.Option(
+        True,
+        "--global-dedup/--no-global-dedup",
+        help="Skip the global dedup only for a window from `extract-window` (segments proven "
+        "non-overlapping); key uniqueness is then asserted, and a violation fails the build.",
+    ),
 ) -> None:
     """Build the DuckDB warehouse from raw/fixture Parquet + run all SQL models."""
     settings = cfg.get_settings()
     glob = source_glob or str(cfg.FIXTURES_DIR / "*.parquet")
     con = connect(settings.warehouse_path)
-    report = build_warehouse(con, glob, cfg.SQL_DIR)
+    try:
+        report = build_warehouse(con, glob, cfg.SQL_DIR, global_dedup=global_dedup)
+    except DuplicateEventsError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
     typer.echo(f"Built warehouse in {report.elapsed_seconds:.2f}s:")
     for table, count in report.tables.items():
-        typer.echo(f"  {table}: {count} rows")
+        took = report.model_seconds.get(table)
+        typer.echo(f"  {table}: {count} rows" + (f"  ({took:.1f}s)" if took is not None else ""))
+    check = report.model_seconds.get("stg_transfers_uniqueness_check")
+    if check is not None:
+        typer.echo(f"  (stg_transfers key-uniqueness assertion: {check:.1f}s)")
 
 
 @app.command()
