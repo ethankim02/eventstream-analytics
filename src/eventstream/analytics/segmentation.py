@@ -21,6 +21,20 @@ def segment_distribution(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
     ).fetchdf()
 
 
+def segment_cutoffs(con: duckdb.DuckDBPyConnection) -> pd.DataFrame:
+    """The data-derived thresholds `mart_wallet_segments` used, recomputed the same way,
+    so a reported segment table can state the cutoffs it depends on."""
+    return con.execute(
+        """
+        SELECT
+            approx_quantile(total_events, 0.50) AS p50_events,
+            approx_quantile(total_events, 0.90) AS p90_events,
+            approx_quantile(total_amount, 0.90) AS p90_amount
+        FROM int_wallet_lifecycle
+        """
+    ).fetchdf()
+
+
 def engagement_summary(con: duckdb.DuckDBPyConnection) -> dict:
     row = (
         con.execute(

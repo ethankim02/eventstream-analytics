@@ -23,14 +23,25 @@ class ActivationComparison:
     lift_ratio: float | None
     week_offset: int
     mature_only: bool
+    opening_cohort_excluded: bool = False
 
 
 def activation_vs_retention(
-    con: duckdb.DuckDBPyConnection, week_offset: int = 4
+    con: duckdb.DuckDBPyConnection,
+    week_offset: int = 4,
+    exclude_opening_cohort: bool = False,
 ) -> ActivationComparison:
     """Compare mature-cohort W{week_offset} observed return between wallets
     that did/didn't satisfy the activation proxy (>=2 distinct active days
-    in their first 7 observed days).
+    within their first 7 calendar days, first-seen day included).
+
+    `exclude_opening_cohort` drops the window's first cohort week, which is
+    dominated by wallets already active before observation began (left-censored)
+    and so is not a first-seen cohort in any meaningful sense.
+
+    Use week_offset >= 2 for interpretation: the activation window spans days
+    0-6, so at offset 1 it can overlap the outcome week and the association is
+    partly mechanical.
     """
     query = """
         WITH mature AS (
@@ -47,6 +58,9 @@ def activation_vs_retention(
                             FROM stg_transfers
                         ) AS is_mature
                     FROM int_wallet_first_seen fs
+                    WHERE NOT ? OR fs.first_seen_week > (
+                        SELECT MIN(first_seen_week) FROM int_wallet_first_seen
+                    )
                 )
                 WHERE is_mature
             )
@@ -66,7 +80,7 @@ def activation_vs_retention(
         LEFT JOIN returned r ON r.wallet_address = m.wallet_address
         GROUP BY act.is_activated
     """
-    df = con.execute(query, [week_offset + 1, week_offset]).fetchdf()
+    df = con.execute(query, [week_offset + 1, exclude_opening_cohort, week_offset]).fetchdf()
 
     def _rate(is_activated: bool) -> tuple[int, float | None]:
         row = df[df["is_activated"] == is_activated]
@@ -92,6 +106,7 @@ def activation_vs_retention(
         lift_ratio=lift,
         week_offset=week_offset,
         mature_only=True,
+        opening_cohort_excluded=exclude_opening_cohort,
     )
 
 

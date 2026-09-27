@@ -309,3 +309,28 @@ def test_retention_cell_is_immature_when_window_ends_mid_week(tmp_path):
     assert con.execute(
         "SELECT bool_and(is_mature) FROM mart_retention_cohorts WHERE week_offset <= 1"
     ).fetchone()[0]
+
+
+def test_activation_comparison_can_exclude_the_opening_cohort(built_con):
+    pooled = lifecycle.activation_vs_retention(built_con, week_offset=1)
+    later_only = lifecycle.activation_vs_retention(
+        built_con, week_offset=1, exclude_opening_cohort=True
+    )
+    assert later_only.opening_cohort_excluded and not pooled.opening_cohort_excluded
+    n_pooled = pooled.activated_wallets + pooled.non_activated_wallets
+    n_later = later_only.activated_wallets + later_only.non_activated_wallets
+    assert 0 < n_later < n_pooled  # the opening cohort's wallets were removed, and only those
+
+    opening_week = built_con.execute(
+        "SELECT MIN(first_seen_week) FROM int_wallet_first_seen"
+    ).fetchone()[0]
+    n_opening_mature = built_con.execute(
+        "SELECT COUNT(*) FROM int_wallet_first_seen WHERE first_seen_week = ?", [opening_week]
+    ).fetchone()[0]
+    assert n_pooled - n_later == n_opening_mature
+
+
+def test_segment_cutoffs_are_ordered(built_con):
+    cutoffs = segmentation.segment_cutoffs(built_con).iloc[0]
+    assert 1 <= cutoffs["p50_events"] <= cutoffs["p90_events"]
+    assert cutoffs["p90_amount"] > 0
